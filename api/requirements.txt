@@ -1,0 +1,17 @@
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pymilvus==2.3.4
+redis==5.0.1
+open-clip-torch==2.20.0
+torch==2.1.0
+torchvision==0.16.0
+pydantic==2.5.0
+python-multipart==0.0.6
+numpy==1.26.2
+pillow==10.1.0
+requests==2.31.0
+minio==7.2.0
+# Pin marshmallow to <4.0 to fix compatibility with environs used by pymilvus
+marshmallow<4.0
+# YOLO for hybrid object detection search
+ultralytics==8.0.200

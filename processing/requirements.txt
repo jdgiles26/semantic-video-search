@@ -1,0 +1,16 @@
+opencv-python-headless==4.8.1.78
+ffmpeg-python==0.2.0
+open-clip-torch==2.20.0
+torch==2.1.0
+torchvision==0.16.0
+pymilvus==2.3.4
+redis==5.0.1
+yt-dlp==2023.11.16
+pillow==10.1.0
+numpy==1.26.2
+requests==2.31.0
+python-multipart==0.0.6
+minio==7.2.0
+scenedetect==0.6.2
+# Pin marshmallow to <4.0 to fix compatibility with environs used by pymilvus
+marshmallow<4.0
