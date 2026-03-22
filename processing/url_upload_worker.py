@@ -8,7 +8,7 @@ import time
 import logging
 import tempfile
 import shutil
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 import redis
 import json
 import requests
@@ -17,6 +17,10 @@ import yt_dlp
 from frame_sampler import FrameSampler
 from embedding import get_embedder
 from vector_store import get_vector_store
+from object_detector import get_object_detector
+from mission_intelligence import MissionIntelligenceEngine
+from ai_provider import get_ai_service
+from watchlist_manager import WatchlistManager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -50,6 +54,10 @@ class URLUploadWorker:
         self.embedder = get_embedder()
         self.vector_store = get_vector_store(host=milvus_host, port=milvus_port,
                                               embedding_dim=self.embedder.embedding_dim)
+        self.object_detector = get_object_detector()
+        self.mission_engine = MissionIntelligenceEngine()
+        self.ai_service = get_ai_service()
+        self.watchlist_manager = WatchlistManager(self.redis_client)
         self.storage_path = storage_path
         
         # Ensure storage directory exists
@@ -148,6 +156,71 @@ class URLUploadWorker:
                         frame_count=len(clip_segment.frames),
                         thumbnail_path=thumbnail_path
                     )
+
+                    # Enrich with object and mission metadata
+                    object_scores = self.object_detector.detect_batch(frame_arrays) if self.object_detector else {}
+                    detected_objects = [
+                        {"label": label, "confidence": float(conf)}
+                        for label, conf in sorted(object_scores.items(), key=lambda x: x[1], reverse=True)[:12]
+                    ]
+                    tmp_enriched, _ = self.mission_engine.enrich_results(
+                        query=" ".join([o["label"] for o in detected_objects]),
+                        results=[{
+                            "id": int(clip_id),
+                            "score": 0.5,
+                            "source_type": source_type,
+                            "source_name": source_name,
+                            "timestamp": timestamp,
+                            "detected_objects": detected_objects
+                        }],
+                        mode="mission_ai"
+                    )
+                    signal = tmp_enriched[0] if tmp_enriched else {}
+                    signal = self._apply_watch_alert(
+                        clip_id=int(clip_id),
+                        source_type=source_type,
+                        source_name=source_name,
+                        timestamp=timestamp,
+                        detected_objects=detected_objects,
+                        clip_path=clip_segment.chunk_path,
+                        thumbnail_path=thumbnail_path,
+                        signal=signal,
+                    )
+                    self.redis_client.hset(
+                        f"clip_meta:{clip_id}",
+                        mapping={
+                            "detected_objects": json.dumps(detected_objects),
+                            "object_scores": json.dumps(object_scores),
+                            "clip_tags": json.dumps([o["label"] for o in detected_objects[:6]]),
+                            "urgency_score": str(signal.get("urgency_score", 0.0)),
+                            "urgency_level": str(signal.get("urgency_level", "low")),
+                            "urgency_reasons": json.dumps(signal.get("urgency_reasons", [])),
+                            "mission_score": str(signal.get("mission_score", 0.0)),
+                            "watch_alert_id": str(signal.get("watch_alert_id", "")),
+                            "watch_phrase": str(signal.get("watch_phrase", "")),
+                            "watch_summary": str(signal.get("watch_summary", "")),
+                            "watch_assessment": json.dumps(signal.get("watch_assessment", {})),
+                        }
+                    )
+
+                    self.redis_client.lpush("mission:events", json.dumps({
+                        "event_id": f"{source_name}:{clip_id}",
+                        "id": int(clip_id),
+                        "source_name": source_name,
+                        "source_type": source_type,
+                        "timestamp": timestamp,
+                        "urgency_level": signal.get("urgency_level", "low"),
+                        "urgency_score": signal.get("urgency_score", 0.0),
+                        "mission_score": signal.get("mission_score", 0.0),
+                        "watch_alert_id": signal.get("watch_alert_id"),
+                        "watch_phrase": signal.get("watch_phrase"),
+                        "watch_summary": signal.get("watch_summary"),
+                        "watch_assessment": signal.get("watch_assessment", {}),
+                        "detected_objects": detected_objects,
+                        "video_chunk_path": clip_segment.chunk_path,
+                        "thumbnail_path": thumbnail_path,
+                    }))
+                    self.redis_client.ltrim("mission:events", 0, 2000)
                     
                     clips_processed += 1
                     frames_processed += len(clip_segment.frames)
@@ -183,6 +256,77 @@ class URLUploadWorker:
             }
         
         return result
+
+    def _apply_watch_alert(
+        self,
+        clip_id: int,
+        source_type: str,
+        source_name: str,
+        timestamp: int,
+        detected_objects: List[Dict],
+        clip_path: str,
+        thumbnail_path: str,
+        signal: Dict,
+    ) -> Dict:
+        active_alert = self.watchlist_manager.get_active_alert(include_findings=False)
+        if not active_alert:
+            return signal
+
+        match = self.watchlist_manager.match_detection(
+            active_alert,
+            detected_objects,
+            text_haystack=f"{source_name} {' '.join([obj.get('label', '') for obj in detected_objects])}",
+        )
+        if not match["matched"]:
+            return signal
+
+        urgency_reasons = list(signal.get("urgency_reasons", []))
+        urgency_reasons.append(f"watchlist:{active_alert.get('watch_phrase')}")
+        signal["urgency_reasons"] = urgency_reasons[:8]
+        signal["urgency_score"] = max(float(signal.get("urgency_score", 0.0)), 0.88)
+        signal["urgency_level"] = "critical" if active_alert.get("priority") == "critical" else "high"
+        signal["mission_score"] = max(float(signal.get("mission_score", 0.0)), 0.9)
+
+        analysis = self.ai_service.review_watch_target({
+            "watch_phrase": active_alert.get("watch_phrase"),
+            "watch_labels": active_alert.get("watch_labels", []),
+            "topics": active_alert.get("topics", []),
+            "entities": active_alert.get("entities", []),
+            "opord_excerpt": active_alert.get("opord_excerpt", ""),
+            "source_name": source_name,
+            "source_type": source_type,
+            "timestamp": timestamp,
+            "detected_objects": detected_objects,
+            "thumbnail_path": thumbnail_path,
+            "video_chunk_path": clip_path,
+        })
+
+        signal["watch_alert_id"] = active_alert.get("alert_id")
+        signal["watch_phrase"] = active_alert.get("watch_phrase")
+        signal["watch_summary"] = analysis.summary
+        signal["watch_assessment"] = analysis.watch_assessment
+
+        self.watchlist_manager.add_finding(
+            active_alert["alert_id"],
+            {
+                "finding_id": f"{source_name}:{clip_id}:{active_alert['watch_phrase']}",
+                "alert_id": active_alert["alert_id"],
+                "watch_phrase": active_alert["watch_phrase"],
+                "source_name": source_name,
+                "source_type": source_type,
+                "timestamp": timestamp,
+                "detected_objects": detected_objects,
+                "matched_labels": match["matched_labels"],
+                "video_chunk_path": clip_path,
+                "thumbnail_path": thumbnail_path,
+                "ai_summary": analysis.summary,
+                "watch_assessment": analysis.watch_assessment,
+                "correlated_sources": signal.get("correlated_sources", []),
+                "mission_score": signal.get("mission_score"),
+                "urgency_level": signal.get("urgency_level"),
+            },
+        )
+        return signal
     
     def process_url_task(self, task_id: str, url: str, max_duration: Optional[int] = None):
         """
@@ -234,7 +378,13 @@ class URLUploadWorker:
         
         logger.info(f"Completed URL task: {task_id}")
     
-    def process_upload_task(self, task_id: str, file_path: str, original_filename: str):
+    def process_upload_task(
+        self,
+        task_id: str,
+        file_path: str,
+        original_filename: str,
+        asset_id: Optional[str] = None,
+    ):
         """
         Process an uploaded file task.
         
@@ -250,6 +400,11 @@ class URLUploadWorker:
             "status": "processing",
             "type": "upload"
         })
+        if asset_id:
+            self.redis_client.hset(f"upload_asset:{asset_id}", mapping={
+                "status": "processing",
+                "notes": "Video is being segmented and indexed for semantic search.",
+            })
         
         # Process the file
         result = self.process_video_file(
@@ -266,6 +421,17 @@ class URLUploadWorker:
             "frames_processed": result.get("frames_processed", 0),
             "errors": json.dumps(result.get("errors", []))
         })
+        if asset_id:
+            final_status = "ready" if result["status"] in {"completed", "completed_with_errors"} else "error"
+            note = (
+                "Video indexed. Preview remains available and searchable clips were generated."
+                if final_status == "ready"
+                else f"Video processing failed: {result.get('error', 'unknown error')}"
+            )
+            self.redis_client.hset(f"upload_asset:{asset_id}", mapping={
+                "status": final_status,
+                "notes": note,
+            })
         
         logger.info(f"Completed upload task: {task_id}")
     
@@ -295,7 +461,8 @@ class URLUploadWorker:
                         self.process_upload_task(
                             task_id=task_id,
                             file_path=task_info.get("file_path"),
-                            original_filename=task_info.get("original_filename")
+                            original_filename=task_info.get("original_filename"),
+                            asset_id=task_info.get("asset_id"),
                         )
                     else:
                         logger.warning(f"Unknown task type: {task_type}")

@@ -95,6 +95,20 @@ services:
       - MILVUS_HOST=milvus-standalone
       - MILVUS_PORT=19530
       - STORAGE_PATH=/app/storage
+      - SUMMARIZER_SERVICE_URL=http://llm-summarizer:8010
+      - POLICY_EMAIL_MAP=${POLICY_EMAIL_MAP:-{}}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - ALERT_FROM_EMAIL=${ALERT_FROM_EMAIL:-}
+      - AI_PROVIDER=${AI_PROVIDER:-ollama}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-llava:7b}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      - WEBGPU_ENABLED=${WEBGPU_ENABLED:-false}
     volumes:
       - video-storage:/app/storage
       - video-chunks:/tmp/video_chunks
@@ -105,11 +119,50 @@ services:
     networks:
       - video-search-network
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/"]
       interval: 30s
       timeout: 10s
       retries: 3
+
+  # Dedicated LLM summarizer for commander SITREPs
+  llm-summarizer:
+    container_name: video-search-summarizer
+    build:
+      context: ..
+      dockerfile: deployment/api.Dockerfile
+    command: uvicorn api.summarizer_service:app --host 0.0.0.0 --port 8010
+    ports:
+      - "8010:8010"
+    environment:
+      - LLM_API_BASE=${LLM_API_BASE:-}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o-mini}
+    depends_on:
+      - redis
+    networks:
+      - video-search-network
+    restart: unless-stopped
+
+  # Background predictor worker (time-series + event graph risk forecast)
+  risk-predictor:
+    container_name: video-search-risk-predictor
+    build:
+      context: ..
+      dockerfile: deployment/worker.Dockerfile
+    command: python processing/risk_predictor_worker.py
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - PREDICTOR_POLL_SECONDS=${PREDICTOR_POLL_SECONDS:-15}
+    depends_on:
+      - redis
+      - search-api
+    networks:
+      - video-search-network
+    restart: unless-stopped
 
   # RTSP Worker
   rtsp-worker:

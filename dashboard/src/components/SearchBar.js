@@ -14,7 +14,8 @@ const SearchBar = ({ onSearch, isLoading }) => {
   const modeDescriptions = {
     clip: 'Fast semantic search using CLIP',
     yolo_hybrid: 'CLIP + YOLO for better object accuracy',
-    advanced_clip: 'Larger CLIP model (slower, more accurate)'
+    advanced_clip: 'Larger CLIP model (slower, more accurate)',
+    mission_ai: 'Mission mode: CLIP + YOLO + urgency/correlation ranking'
   };
 
   return (
@@ -50,6 +51,16 @@ const SearchBar = ({ onSearch, isLoading }) => {
             />
             <span className="mode-icon">🧠</span>
             <span className="mode-label">Advanced CLIP</span>
+          </label>
+          <label className={`search-mode-option ${searchMode === 'mission_ai' ? 'active' : ''}`}>
+            <input
+              type="radio"
+              value="mission_ai"
+              checked={searchMode === 'mission_ai'}
+              onChange={(e) => setSearchMode(e.target.value)}
+            />
+            <span className="mode-icon">🚨</span>
+            <span className="mode-label">Mission AI</span>
           </label>
         </div>
         <div className="search-mode-description">
