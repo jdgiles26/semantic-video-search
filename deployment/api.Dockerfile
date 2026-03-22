@@ -31,11 +31,14 @@ RUN pip install --no-cache-dir -r processing/requirements.txt \
     && pip install --no-cache-dir -r api/requirements.txt
 
 # Copy application code
-COPY processing/*.py /app/processing/
-COPY api/*.py /app/api/
+COPY processing /app/processing/
+COPY api /app/api/
 
 # Create storage directory
 RUN mkdir -p /app/storage
+
+# Ensure package imports resolve from the project root.
+ENV PYTHONPATH=/app
 
 # Expose port
 EXPOSE 8000
