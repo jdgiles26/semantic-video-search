@@ -5,8 +5,8 @@ torch==2.8.0
 torchvision==0.16.0
 pymilvus==2.3.4
 redis==5.0.1
-yt-dlp==2026.2.21
-pillow==12.1.1
+yt-dlp==2026.7.4
+pillow==13.0.0
 numpy==1.26.2
 requests==2.33.0
 python-multipart==0.0.22
